@@ -6,6 +6,8 @@ from typing import cast, Optional, Union
 import torch
 import torch.distributed as dist
 from torch.distributed._state_dict_utils import _offload_state_dict_to_cpu
+from torch.distributed.checkpoint.logger import _dcp_method_logger
+from torch.distributed.checkpoint.planner import SavePlan
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.distributed_c10d import _get_default_group
 
@@ -48,6 +50,7 @@ def save_state_dict(
         )
 
 
+@_dcp_method_logger(log_exceptions=True)  # type: ignore[arg-type]
 @_api_bc_check
 def save(
     state_dict: STATE_DICT_TYPE,
@@ -151,6 +154,7 @@ def save(
         )
 
 
+@_dcp_method_logger(log_exceptions=True)  # type: ignore[arg-type]
 def async_save(
     state_dict: STATE_DICT_TYPE,
     *,
@@ -214,7 +218,7 @@ def async_save(
     cpu_state_dict = _offload_state_dict_to_cpu(_stateful_to_state_dict(state_dict))
 
     executor = ThreadPoolExecutor(max_workers=1)
-    f = executor.submit(
+    f: Future = executor.submit(
         save,
         cpu_state_dict,
         checkpoint_id=checkpoint_id,
@@ -254,6 +258,11 @@ def _save_state_dict(
 
     global_metatadata = None
 
+    ckpt_kwargs = {}
+    if (ckpt_id := getattr(storage_writer, "checkpoint_id", None)) is not None:
+        ckpt_kwargs["checkpoint_id"] = ckpt_id
+
+    @_dcp_method_logger(**ckpt_kwargs)  # type: ignore[arg-type]
     def local_step():
         assert planner is not None
         planner.set_up_planner(state_dict, distW.is_coordinator)
@@ -262,6 +271,7 @@ def _save_state_dict(
         local_plan = storage_writer.prepare_local_plan(local_plan)
         return local_plan
 
+    @_dcp_method_logger(**ckpt_kwargs)  # type: ignore[arg-type]
     def global_step(all_local_plans):
         nonlocal global_metatadata
 
@@ -270,8 +280,9 @@ def _save_state_dict(
         all_local_plans = storage_writer.prepare_global_plan(all_local_plans)
         return all_local_plans
 
-    central_plan = distW.reduce_scatter("plan", local_step, global_step)
+    central_plan: SavePlan = distW.reduce_scatter("plan", local_step, global_step)
 
+    @_dcp_method_logger(**ckpt_kwargs)  # type: ignore[arg-type]
     def write_data():
         assert planner is not None
         final_local_plan = planner.finish_plan(central_plan)
@@ -280,6 +291,7 @@ def _save_state_dict(
         all_writes.wait()
         return all_writes.value()
 
+    @_dcp_method_logger(**ckpt_kwargs)  # type: ignore[arg-type]
     def finish_checkpoint(all_results):
         assert global_metatadata is not None
         storage_writer.finish(metadata=global_metatadata, results=all_results)
