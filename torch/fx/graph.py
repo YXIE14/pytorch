@@ -753,6 +753,36 @@ class _PyTreeCodeGen(CodeGen):
         else:
             return super().generate_output(output_args)
 
+class _FindNodesLookupTable:
+    """
+    Side table for the graph for the purpose of doing fast queries
+    """
+    def __init__(self):
+        self.table: Dict[Tuple[str, Optional[Target]], Dict[Node, None]] = defaultdict(dict)
+
+    def _key(self, node) -> Tuple[str, Optional[Target]]:
+        return (node.op, node.target if node.op == "call_function" else None)
+
+    def __contains__(self, node) -> bool:
+        return node in self.table[self._key(node)]
+
+    def insert(self, node: Node) -> None:
+        self.table[self._key(node)][node] = None
+
+    def remove(self, node: Node) -> None:
+        self.table[self._key(node)].pop(node)
+
+    def find_nodes(self, *, op: str, target: Optional['Target'] = None):
+        if op == "call_function":
+            assert target is not None
+            return sorted(dict(self.table[(op, target)]).keys())
+
+        if target is None:
+            return sorted(dict(self.table[(op, None)]).keys())
+
+        # op is call_method, get_attr, call_module
+        return sorted([node for node in self.table[(op, None)].keys() if node.target == target])
+
 @compatibility(is_backward_compatible=True)
 class Graph:
     """
@@ -814,6 +844,7 @@ class Graph:
         self._tracer_extras = tracer_extras
         self._codegen = CodeGen()
         self._co_fields : Dict[str, Any] = {}
+        self._find_nodes_lookup_table = _FindNodesLookupTable()
 
     @property
     def owning_module(self):
@@ -837,6 +868,24 @@ class Graph:
             this list to switch iteration order.
         """
         return _node_list(self)
+
+    @compatibility(is_backward_compatible=False)
+    def find_nodes(self, *, op: str, target: Optional['Target'] = None):
+        """
+        Allows for fast query of nodes
+
+        Args:
+
+            op: the name of the operation
+            target: the target of the node. For call_function, the target is
+                required. For other ops, the target is optional.
+
+        Returns:
+
+            Iteratable of nodes with the requested op and target.
+            The nodes are guaranteed to be in order they appear on the graph.
+        """
+        return self._find_nodes_lookup_table.find_nodes(op=op, target=target)
 
     @compatibility(is_backward_compatible=True)
     def graph_copy(self, g : 'Graph', val_map : Dict[Node, Node], return_output_node=False) -> 'Optional[Argument]':
@@ -927,6 +976,7 @@ class Graph:
         self._graph_namespace.associate_name_with_obj(name, n)
 
         self._insert(n)
+        self._find_nodes_lookup_table.insert(n)
         self._len += 1
         return n
 
@@ -961,6 +1011,7 @@ class Graph:
             warnings.warn(f"erase_node({to_erase}) on an already erased node")
             return
 
+        self._find_nodes_lookup_table.remove(to_erase)
         to_erase._remove_from_list()
         to_erase._erased = True  # iterators may retain handles to erased nodes
         self._len -= 1
@@ -1421,6 +1472,8 @@ class Graph:
                 raise RuntimeError(f'Node {node} had unknown opcode {node.op}!')
             if node.graph is not self:
                 raise RuntimeError(f'Node \'{node}\' does not belong to this Graph!')
+            if node not in self._find_nodes_lookup_table:
+                raise RuntimeError(f"Node \'{node}\' is not added to the side table")
             map_arg(node.args, lambda arg: check_arg(arg, node))
             map_arg(node.kwargs, lambda arg: check_arg(arg, node))
             seen_values.add(node)
