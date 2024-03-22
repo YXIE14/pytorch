@@ -26,6 +26,7 @@ import weakref
 import operator
 from torch.utils._stats import count
 import logging
+import traceback
 
 from torch.overrides import TorchFunctionMode
 
@@ -589,6 +590,23 @@ class PythonKeyTracer(Tracer):
             return get_proxy_slot(e, self, e)
         else:
             return e
+
+    def create_node(self, *args, **kwargs):
+        '''
+        Add stack_trace metadata here if not already present,
+        by filtering out forward() stack frames
+        '''
+        node = super().create_node(*args, **kwargs)
+        if 'stack_trace' not in node.meta and node.op not in ["placeholder", "output"]:
+            user_frame = self._find_user_frame()
+            if user_frame:
+                summary = traceback.extract_stack(user_frame)
+                # some information loss here if we use a wrapper module on a callable
+                stack_trace = [frame for frame in summary if frame.name == 'forward']
+                if stack_trace:  # this is empty if we compile through dynamo
+                    stack_trace = traceback.StackSummary.from_list(stack_trace)
+                    node.meta["stack_trace"] = ''.join(stack_trace.format())
+        return node
 
 
 @contextmanager

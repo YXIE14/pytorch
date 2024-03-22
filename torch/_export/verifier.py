@@ -249,6 +249,10 @@ class Verifier(metaclass=_VerifierMeta):
                 # elif node.op == "output":
                 #     _check_flattened_outputs()
 
+        # We won't actually run this here, just trying this to trigger testing.
+        from torch.export._trace import _verify_stack_trace
+        _verify_stack_trace(gm)
+
         self.check_additional(gm)
 
 

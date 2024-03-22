@@ -480,13 +480,14 @@ def _export_non_strict(
 
         gm = replace_set_grad_with_hop_pass(gm)
 
-    # Remove nn_module_stack metadata from all placeholders/inputs nodes.
+    # Remove nn_module_stack, stack_trace metadata from all placeholders/inputs nodes.
     for mod in gm.modules():
         if not isinstance(mod, torch.fx.GraphModule):
             continue
         for node in mod.graph.nodes:
             if node.op in ["placeholder", "output"]:
                 node.meta.pop("nn_module_stack", None)
+                node.meta.pop("stack_trace", None)
 
     # NOTE: aot_export adds symint metadata for placeholders with int values;
     # since these become specialized, we replace such metadata with the original values
@@ -654,6 +655,30 @@ def _verify_nn_module_stack(graph_module: torch.fx.GraphModule) -> None:
                 if node.meta.get("nn_module_stack", None):
                     raise SpecViolationError(
                         f"Node {node} of type {node.op} contains nn_module_stack metadata, this should be None"
+                    )
+
+
+def _verify_stack_trace(graph_module: torch.fx.GraphModule) -> None:
+    """
+    Perform stack trace checks on the graph.
+    Constraints:
+        - None or non-empty str for 'call_function', 'get_attr'
+        - None for 'placeholder', 'output'
+    """
+    for i, mod in enumerate([graph_module] + list(graph_module.modules())):
+        if not isinstance(mod, torch.fx.GraphModule):
+            continue
+        for node in graph_module.graph.nodes:
+            stack_trace = node.meta.get("stack_trace", None)
+            if node.op in ["call_function", "get_attr"]:
+                if stack_trace is not None and not isinstance(stack_trace, str):
+                    raise SpecViolationError(
+                        f"Node {node} of type {node.op} has invalid stack_trace metadata, this should be a string: {stack_trace}"
+                    )
+            elif node.op in ["placeholder", "output"]:
+                if stack_trace:
+                    raise SpecViolationError(
+                        f"Node {node} of type {node.op} contains stack_trace metadata, this should be None"
                     )
 
 
@@ -915,6 +940,7 @@ def _export(
 
         _rewrite_non_persistent_buffers(mod, ep_non_strict.sig, ep_non_strict.constants)
         _verify_nn_module_stack(gm)
+        _verify_stack_trace(gm)
         return ExportedProgram(
             root=gm,
             graph=gm.graph,
@@ -1034,9 +1060,10 @@ def _export(
     export_graph_signature = ep_non_strict.sig
     constants = ep_non_strict.constants
 
-    # Don't copy over nn_module_stack metadata for params/buffers nodes
+    # Don't copy over nn_module_stack, stack_trace metadata for params/buffers nodes
     for metadata in params_buffers_to_node_meta.values():
         metadata.pop("nn_module_stack", None)
+        metadata.pop("stack_trace", None)
 
     # After aot_export, set the param/buffer metadata back into placeholders
     # Technically, users can still construct this data from param names
